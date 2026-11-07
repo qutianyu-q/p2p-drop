@@ -2,7 +2,7 @@ import type { DataConnection } from 'peerjs';
 import { CHUNK_SIZE, chunkCount, encodeChunk, fileFingerprint } from '../core/chunks';
 import { Backpressure, LOW_WATER } from '../core/backpressure';
 import { ChunkBitmap } from '../core/bitmap';
-import { decodeMsg, encodeMsg, type ControlMessage, type FileMeta } from './protocol';
+import { decodeMsg, encodeMsg, DATA_LANES, type ControlMessage, type FileMeta } from './protocol';
 import { createRoom } from './signaling';
 import type Peer from 'peerjs';
 
@@ -27,13 +27,13 @@ interface PendingSend {
   started: boolean;
 }
 
-/** 发送会话：创建房间、维护文件队列、按接收方位图补发缺失块 */
+/** 发送会话：创建房间、维护文件队列、4 条并行数据通道按接收方位图补发缺失块 */
 export class SenderSession {
   readonly entries: SendEntry[] = [];
   private peer: Peer;
   private control: DataConnection | null = null;
-  private dataConns = new Map<number, DataConnection>();
-  private dataWaiters = new Map<number, (conn: DataConnection) => void>();
+  private dataConns = new Map<string, DataConnection>();
+  private dataWaiters = new Map<string, (conn: DataConnection) => void>();
   private pending = new Map<number, PendingSend>();
   private wants = new Set<number>();
   private paused = new Set<number>();
@@ -74,6 +74,8 @@ export class SenderSession {
 
   pauseFile(fileId: number): void {
     this.paused.add(fileId);
+    const pending = this.pending.get(fileId);
+    if (pending) pending.started = false; // 允许之后重新启动发送循环
     const entry = this.entry(fileId);
     if (entry && entry.status === 'sending') entry.status = 'paused';
     this.events.onChange();
@@ -130,16 +132,21 @@ export class SenderSession {
   }
 
   private attachData(conn: DataConnection): void {
-    const fileId = Number(conn.label.replace('file-', ''));
-    this.dataConns.set(fileId, conn);
-    this.dataWaiters.get(fileId)?.(conn);
-    this.dataWaiters.delete(fileId);
+    const match = /^file-(\d+)-(\d+)$/.exec(conn.label);
+    if (!match) return;
+    const fileId = Number(match[1]);
+    const key = `${fileId}-${match[2]}`;
+    this.dataConns.set(key, conn);
+    this.dataWaiters.get(key)?.(conn);
+    this.dataWaiters.delete(key);
     conn.on('close', () => {
-      // 通道断开：停止该文件当前发送循环，等待对方重连后重新 want
+      // 任一通道断开：停止该文件所有发送循环，等待对方重连后重新 want
       this.paused.add(fileId);
       this.pending.delete(fileId);
       this.wants.delete(fileId);
-      this.dataConns.delete(fileId);
+      for (const k of [...this.dataConns.keys()]) {
+        if (k.startsWith(`${fileId}-`)) this.dataConns.delete(k);
+      }
       const entry = this.entry(fileId);
       if (entry && entry.status === 'sending') entry.status = 'queued';
       this.events.onChange();
@@ -179,7 +186,11 @@ export class SenderSession {
         const entry = this.entry(msg.fileId);
         if (!entry) return;
         const count = chunkCount(entry.meta.size);
-        entry.acked = ChunkBitmap.fromBase64(msg.bitmap, count).receivedCount();
+        const bitmap = ChunkBitmap.fromBase64(msg.bitmap, count);
+        entry.acked = bitmap.receivedCount();
+        // 刷新位图：用户暂停后继续时基于最新进度补发，避免大量重发
+        const pending = this.pending.get(msg.fileId);
+        if (pending) pending.bitmap = bitmap;
         this.events.onChange();
         break;
       }
@@ -193,6 +204,8 @@ export class SenderSession {
         const entry = this.entry(msg.fileId);
         if (entry) entry.status = 'cancelled';
         this.paused.add(msg.fileId);
+        const pending = this.pending.get(msg.fileId);
+        if (pending) pending.started = false;
         this.events.onChange();
         break;
       }
@@ -208,9 +221,18 @@ export class SenderSession {
     if (!this.wants.has(fileId) || this.cancelled.has(fileId)) return;
     pending.started = true;
     this.paused.delete(fileId);
+    entry.status = 'sending';
+    entry.acked = pending.bitmap.receivedCount();
+    this.events.onChange();
     try {
-      const conn = await this.dataConn(fileId);
-      await this.sendLoop(entry, conn, pending.bitmap);
+      const lanes = Array.from({ length: DATA_LANES }, (_, lane) => lane);
+      const conns = await Promise.all(lanes.map((lane) => this.dataConn(fileId, lane)));
+      // 4 条通道并行，各自按位置取模认领缺失块，突破单通道拥塞控制上限
+      await Promise.all(conns.map((conn, lane) => this.sendLane(entry, conn, pending.bitmap, lane)));
+      if (!this.paused.has(fileId) && !this.cancelled.has(fileId)) {
+        entry.status = 'sent'; // 全部发完，等待接收方写盘完成回 done
+        this.events.onChange();
+      }
     } catch {
       entry.status = 'queued';
       pending.started = false;
@@ -218,19 +240,18 @@ export class SenderSession {
     }
   }
 
-  private dataConn(fileId: number): Promise<DataConnection> {
-    const existing = this.dataConns.get(fileId);
+  private dataConn(fileId: number, lane: number): Promise<DataConnection> {
+    const key = `${fileId}-${lane}`;
+    const existing = this.dataConns.get(key);
     if (existing?.open) return Promise.resolve(existing);
-    return new Promise((resolve) => this.dataWaiters.set(fileId, resolve));
+    return new Promise((resolve) => this.dataWaiters.set(key, resolve));
   }
 
-  private async sendLoop(entry: SendEntry, conn: DataConnection, bitmap: ChunkBitmap): Promise<void> {
+  private async sendLane(entry: SendEntry, conn: DataConnection, bitmap: ChunkBitmap, lane: number): Promise<void> {
     const { file, meta } = entry;
-    entry.status = 'sending';
-    entry.acked = bitmap.receivedCount();
-    this.events.onChange();
     const bp = new Backpressure();
-    const missing = bitmap.missing();
+    const all = bitmap.missing();
+    const missing = all.filter((_, position) => position % DATA_LANES === lane);
     // 预读下一块：磁盘 IO 与网络发送并行，避免每块都同步等待 file.read
     const readChunk = (index: number): Promise<Uint8Array> => {
       const start = index * CHUNK_SIZE;
@@ -252,10 +273,6 @@ export class SenderSession {
         }
         if (!conn.open || this.paused.has(meta.id) || this.cancelled.has(meta.id)) return;
       }
-    }
-    if (!this.paused.has(meta.id) && !this.cancelled.has(meta.id)) {
-      entry.status = 'sent'; // 全部发完，等待接收方写盘完成回 done
-      this.events.onChange();
     }
   }
 }

@@ -1,3 +1,6 @@
+/** 每个文件的并行数据通道数：多路并行突破 WebRTC 单通道拥塞控制的吞吐上限 */
+export const DATA_LANES = 4;
+
 /** 控制通道消息：JSON 编码的判别联合 */
 export interface FileMeta {
   id: number;

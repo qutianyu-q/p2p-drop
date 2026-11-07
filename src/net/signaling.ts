@@ -50,10 +50,10 @@ export function joinRoom(code: string): Promise<{ peer: Peer; control: DataConne
   });
 }
 
-/** 接收方为某个文件主动发起一条数据通道，label 为 file-<id> */
-export function openDataChannel(peer: Peer, code: string, fileId: number): Promise<DataConnection> {
+/** 接收方为某个文件的某条并行通道发起连接，label 为 file-<id>-<lane> */
+export function openDataChannel(peer: Peer, code: string, fileId: number, lane: number): Promise<DataConnection> {
   return new Promise((resolve, reject) => {
-    const conn = peer.connect(peerIdForRoom(code), { label: `file-${fileId}` });
+    const conn = peer.connect(peerIdForRoom(code), { label: `file-${fileId}-${lane}` });
     const timeout = setTimeout(() => reject(new Error('数据通道建立超时')), 20000);
     conn.on('open', () => {
       clearTimeout(timeout);

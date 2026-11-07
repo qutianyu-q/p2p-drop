@@ -40,13 +40,17 @@ class SpeedMeter {
   speed(id: number, bytes: number): string {
     const now = Date.now();
     const prev = this.last.get(id);
+    // 采样间隔不足 0.5s 时不更新基准，否则高频渲染会让 dt 永远达不到阈值
+    if (prev && (now - prev.time) / 1000 < 0.5) return this.lastSpeed.get(id) ?? '';
     this.last.set(id, { bytes, time: now });
     if (!prev) return '';
-    const dt = (now - prev.time) / 1000;
-    if (dt < 0.5) return '';
-    const v = (bytes - prev.bytes) / dt;
-    return v > 0 ? `${formatSize(v)}/s` : '';
+    const v = (bytes - prev.bytes) / ((now - prev.time) / 1000);
+    const text = v > 0 ? `${formatSize(v)}/s` : '';
+    this.lastSpeed.set(id, text);
+    return text;
   }
+
+  private lastSpeed = new Map<number, string>();
 }
 
 function shell(root: HTMLElement, title: string, onExit: () => void): HTMLElement {
@@ -144,7 +148,7 @@ export function renderSenderRoom(root: HTMLElement, session: SenderSession, onEx
       .map((entry) => {
         const { meta } = entry;
         const total = chunkCount(meta.size);
-        const percent = total === 0 ? (entry.status === 'done' ? 100 : 0) : Math.floor((entry.acked / total) * 100);
+        const percent = total === 0 ? (entry.status === 'done' ? 100 : 0) : (entry.acked / total) * 100;
         const bytes = Math.min(entry.acked * CHUNK_SIZE, meta.size);
         const speed = entry.status === 'sending' ? meter.speed(meta.id, bytes) : '';
         const actions =
@@ -164,7 +168,7 @@ export function renderSenderRoom(root: HTMLElement, session: SenderSession, onEx
           </div>
           <div class="progress"><div class="progress-bar" style="width:${percent}%"></div></div>
           <div class="file-bottom">
-            <span>${fileStatusText[entry.status]} · ${percent}% ${speed}</span>
+            <span>${fileStatusText[entry.status]} · ${formatSize(bytes)} / ${formatSize(meta.size)}（${percent.toFixed(1)}%）${speed}</span>
             <span class="actions">${actions}${cancel}</span>
           </div>
         </li>`;
@@ -211,7 +215,7 @@ export function renderReceiverRoom(root: HTMLElement, session: ReceiverSession, 
       .map((entry) => {
         const { meta } = entry;
         const total = chunkCount(meta.size);
-        const percent = total === 0 ? (entry.status === 'done' ? 100 : 0) : Math.floor((entry.received / total) * 100);
+        const percent = total === 0 ? (entry.status === 'done' ? 100 : 0) : (entry.received / total) * 100;
         const bytes = Math.min(entry.received * CHUNK_SIZE, meta.size);
         const speed = entry.status === 'receiving' ? meter.speed(meta.id, bytes) : '';
         const statusText =
@@ -239,7 +243,7 @@ export function renderReceiverRoom(root: HTMLElement, session: ReceiverSession, 
           </div>
           <div class="progress"><div class="progress-bar" style="width:${percent}%"></div></div>
           <div class="file-bottom">
-            <span>${statusText} · ${percent}% ${speed}</span>
+            <span>${statusText} · ${formatSize(bytes)} / ${formatSize(meta.size)}（${percent.toFixed(1)}%）${speed}</span>
             <span class="actions">${actions}</span>
           </div>
         </li>`;

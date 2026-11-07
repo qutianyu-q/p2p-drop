@@ -2,7 +2,7 @@ import type { DataConnection } from 'peerjs';
 import type Peer from 'peerjs';
 import { CHUNK_SIZE, chunkCount, decodeChunk } from '../core/chunks';
 import { ChunkBitmap } from '../core/bitmap';
-import { decodeMsg, encodeMsg, type ControlMessage, type FileMeta } from './protocol';
+import { decodeMsg, encodeMsg, DATA_LANES, type ControlMessage, type FileMeta } from './protocol';
 import { joinRoom, openDataChannel } from './signaling';
 import { ReceiveStore } from '../storage/receiveStore';
 import { createSink, type FileSink } from '../storage/sink';
@@ -81,19 +81,23 @@ export class ReceiverSession {
         return;
       }
 
-      const conn = await openDataChannel(this.peer!, this.code, fileId);
-      conn.on('data', (raw) => this.onChunk(fileId, raw));
-      conn.on('close', () => {
-        // 数据通道断开：立即持久化位图，等用户重新接收即续传
-        const current = this.entries.find((e) => e.meta.id === fileId);
-        if (current && current.status === 'receiving') {
-          current.status = 'paused';
-          current.resumable = true;
-          void this.persist(fileId);
-          this.active.delete(fileId);
-          this.events.onChange();
-        }
-      });
+      // 4 条并行通道，共用同一份位图与写盘队列
+      const lanes = Array.from({ length: DATA_LANES }, (_, lane) => lane);
+      const conns = await Promise.all(lanes.map((lane) => openDataChannel(this.peer!, this.code, fileId, lane)));
+      for (const conn of conns) {
+        conn.on('data', (raw) => this.onChunk(fileId, raw));
+        conn.on('close', () => {
+          // 任一通道断开：立即持久化位图，等用户重新接收即续传
+          const current = this.entries.find((e) => e.meta.id === fileId);
+          if (current && current.status === 'receiving') {
+            current.status = 'paused';
+            current.resumable = true;
+            void this.persist(fileId);
+            this.active.delete(fileId);
+            this.events.onChange();
+          }
+        });
+      }
       this.send({ t: 'want', fileId });
       this.send({ t: 'resume', fileId, bitmap: bitmap.toBase64() });
     } catch (e) {

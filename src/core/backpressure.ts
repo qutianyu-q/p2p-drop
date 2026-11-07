@@ -1,7 +1,7 @@
-/** DataChannel 背压：缓冲区 ≥32MB 停发，≤8MB 恢复。
- *  较高的水位让高延迟公网链路始终保持充足在途数据，填满管道。 */
-export const HIGH_WATER = 32 * 1024 * 1024;
-export const LOW_WATER = 8 * 1024 * 1024;
+/** DataChannel 背压：单通道缓冲区 ≥8MB 停发，≤2MB 恢复。
+ *  4 条并行通道合计最高约 32MB 在途数据，兼顾高延迟链路与内存占用。 */
+export const HIGH_WATER = 8 * 1024 * 1024;
+export const LOW_WATER = 2 * 1024 * 1024;
 
 export class Backpressure {
   private blocked = false;

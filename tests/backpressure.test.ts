@@ -13,8 +13,8 @@ describe('Backpressure', () => {
     expect(bp.update(HIGH_WATER)).toBe(true); // 再次触发
   });
 
-  it('水位常量符合设计', () => {
-    expect(HIGH_WATER).toBe(32 * 1024 * 1024);
-    expect(LOW_WATER).toBe(8 * 1024 * 1024);
+  it('水位常量符合设计（单通道 8/2MB，4 通道合计约 32MB）', () => {
+    expect(HIGH_WATER).toBe(8 * 1024 * 1024);
+    expect(LOW_WATER).toBe(2 * 1024 * 1024);
   });
 });
