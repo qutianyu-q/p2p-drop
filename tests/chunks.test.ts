@@ -2,16 +2,17 @@ import { describe, it, expect } from 'vitest';
 import { CHUNK_SIZE, chunkCount, encodeChunk, decodeChunk, fileFingerprint } from '../src/core/chunks';
 
 describe('chunks', () => {
-  it('块大小为 64 KB', () => {
-    expect(CHUNK_SIZE).toBe(65536);
+  it('块大小为 128 KB，且含头部低于 256 KiB 消息上限', () => {
+    expect(CHUNK_SIZE).toBe(128 * 1024);
+    expect(CHUNK_SIZE + 12).toBeLessThanOrEqual(256 * 1024);
   });
 
   it('计算块数', () => {
     expect(chunkCount(0)).toBe(0);
     expect(chunkCount(1)).toBe(1);
-    expect(chunkCount(65536)).toBe(1);
-    expect(chunkCount(65537)).toBe(2);
-    expect(chunkCount(10_000_000_000)).toBe(Math.ceil(10_000_000_000 / 65536));
+    expect(chunkCount(CHUNK_SIZE)).toBe(1);
+    expect(chunkCount(CHUNK_SIZE + 1)).toBe(2);
+    expect(chunkCount(10_000_000_000)).toBe(Math.ceil(10_000_000_000 / CHUNK_SIZE));
   });
 
   it('块编解码往返一致', () => {

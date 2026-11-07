@@ -1,5 +1,6 @@
-/** 文件分块：64 KB 数据块 + 12 字节二进制头（u32 fileId / u32 index / u32 dataLen） */
-export const CHUNK_SIZE = 65536;
+/** 文件分块：128 KB 数据块 + 12 字节二进制头（u32 fileId / u32 index / u32 dataLen）。
+ *  含头部仍低于 Chromium 256 KiB 单消息上限；更大的块显著降低每消息开销。 */
+export const CHUNK_SIZE = 128 * 1024;
 const HEADER_BYTES = 12;
 
 export function chunkCount(size: number): number {

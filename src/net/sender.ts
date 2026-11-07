@@ -231,11 +231,20 @@ export class SenderSession {
     this.events.onChange();
     const bp = new Backpressure();
     const missing = bitmap.missing();
-    for (const index of missing) {
-      if (this.paused.has(meta.id) || this.cancelled.has(meta.id) || !conn.open) return;
+    // 预读下一块：磁盘 IO 与网络发送并行，避免每块都同步等待 file.read
+    const readChunk = (index: number): Promise<Uint8Array> => {
       const start = index * CHUNK_SIZE;
       const slice = file.slice(start, Math.min(start + CHUNK_SIZE, file.size));
-      const data = new Uint8Array(await slice.arrayBuffer());
+      const p = slice.arrayBuffer().then((buf) => new Uint8Array(buf));
+      p.catch(() => {}); // 提前中断时避免未处理的 rejection
+      return p;
+    };
+    let prefetch: Promise<Uint8Array> | null = missing.length ? readChunk(missing[0]) : null;
+    for (let i = 0; i < missing.length; i++) {
+      const index = missing[i];
+      if (this.paused.has(meta.id) || this.cancelled.has(meta.id) || !conn.open) return;
+      const data = await prefetch!;
+      prefetch = i + 1 < missing.length ? readChunk(missing[i + 1]) : null;
       conn.send(encodeChunk(meta.id, index, data));
       if (bp.update(conn.dataChannel.bufferedAmount)) {
         while (conn.open && conn.dataChannel.bufferedAmount > LOW_WATER) {
