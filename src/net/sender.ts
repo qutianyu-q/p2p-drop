@@ -113,6 +113,7 @@ export class SenderSession {
   private attachControl(conn: DataConnection): void {
     this.control = conn;
     conn.on('open', () => this.events.onState('connected'));
+    if (conn.open) this.events.onState('connected');
     conn.on('data', (raw) => {
       try {
         this.onMessage(decodeMsg(String(raw)));
@@ -152,10 +153,17 @@ export class SenderSession {
         this.send({ t: 'hello', role: 'sender', version: 1 });
         if (this.entries.length) this.send({ t: 'offer', files: this.entries.map((e) => e.meta) });
         break;
-      case 'want':
+      case 'want': {
+        // 接收方重新请求 = 明确要续传，清除此前的取消状态
+        if (this.cancelled.has(msg.fileId)) {
+          this.cancelled.delete(msg.fileId);
+          const entry = this.entry(msg.fileId);
+          if (entry && entry.status === 'cancelled') entry.status = 'queued';
+        }
         this.wants.add(msg.fileId);
         void this.maybeStart(msg.fileId);
         break;
+      }
       case 'resume': {
         const entry = this.entry(msg.fileId);
         if (!entry) return;

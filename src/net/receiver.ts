@@ -84,11 +84,12 @@ export class ReceiverSession {
       const conn = await openDataChannel(this.peer!, this.code, fileId);
       conn.on('data', (raw) => this.onChunk(fileId, raw));
       conn.on('close', () => {
-        // 数据通道断开：位图已持久化，等用户重新接收即续传
+        // 数据通道断开：立即持久化位图，等用户重新接收即续传
         const current = this.entries.find((e) => e.meta.id === fileId);
         if (current && current.status === 'receiving') {
           current.status = 'paused';
           current.resumable = true;
+          void this.persist(fileId);
           this.active.delete(fileId);
           this.events.onChange();
         }
@@ -108,9 +109,22 @@ export class ReceiverSession {
     if (active) active.cancelled = true;
     const entry = this.entries.find((e) => e.meta.id === fileId);
     if (entry) entry.status = 'paused';
+    void this.persist(fileId);
     this.active.delete(fileId);
     this.send({ t: 'cancel', fileId });
     this.events.onChange();
+  }
+
+  /** 立即把当前位图写入 IndexedDB（取消/断线/节流进度时调用） */
+  private async persist(fileId: number): Promise<void> {
+    const active = this.active.get(fileId);
+    const entry = this.entries.find((e) => e.meta.id === fileId);
+    if (!active || !entry || active.bitmap.complete()) return;
+    await this.store.save(entry.meta.fingerprint, {
+      bitmap: active.bitmap.toBase64(),
+      name: entry.meta.name,
+      size: entry.meta.size,
+    });
   }
 
   destroy(): void {
@@ -123,10 +137,13 @@ export class ReceiverSession {
 
   private attachControl(conn: DataConnection): void {
     this.control = conn;
-    conn.on('open', () => {
+    const onOpen = () => {
       this.events.onState('connected');
       this.send({ t: 'hello', role: 'receiver', version: 1 });
-    });
+    };
+    conn.on('open', onOpen);
+    // joinRoom 在 control open 后才返回，open 事件可能已发生过，需立即补发
+    if (conn.open) onOpen();
     conn.on('data', (raw) => {
       try {
         this.onMessage(decodeMsg(String(raw)));
